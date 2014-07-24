@@ -2,7 +2,7 @@
 %define version 0.2
 %define unmangled_version 0.2
 %define unmangled_version 0.2
-%define release 1
+%define release 4
 
 Summary: A REST interface for searching pymongor 
 Name: %{name}
@@ -19,7 +19,7 @@ Group: Development/Libraries
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-buildroot
 Prefix: %{_prefix}
 BuildArch: noarch
-Vendor: Daniel Bauman <Daniel.Bauman@lmco.com>
+Vendor: Lockheed Martin
 Url: https://github.com/lmco/rabid.mongoose
 Requires: mod_wsgi python-pymongor python-flask python-werkzeug, python-jinja2-26, upstart
 %description
@@ -62,7 +62,7 @@ rm -rf $RPM_BUILD_ROOT
 
 
 %pre
-# Add the si-scand user
+# Add the rmongoose user
 /usr/sbin/useradd -c "rmongoose user" \
 -s /sbin/nologin -r -d /home/rmongoose rmongoose 2> /dev/null || : 
 
@@ -74,6 +74,6 @@ initctl reload-configuration
 %{_bindir}/rabidmongoose
 %{_sysconfdir}/init/rabid-mongoose-broker.conf
 %{_localstatedir}/www/rmongoose/rabid.mongoose.wsgi
-%{_sysconfdir}/httpd/conf.d/rabid.mongoose.conf
+%config(noreplace) %{_sysconfdir}/httpd/conf.d/rabid.mongoose.conf
 %{_sysconfdir}/init/rabid-mongoose-broker.conf
 %{_sysconfdir}/security/limits.d/rmongoose.conf

@@ -6,7 +6,9 @@ from time import time
 import zmq
 from collections import OrderedDict
 from rabidmongoose.config import BROKERFRONT, BROKERBACK, LOGTAG, FLUENT, \
-                                 HEARTBEAT_LIVENESS, HEARTBEAT_INTERVAL
+                                 HEARTBEAT_LIVENESS, HEARTBEAT_INTERVAL, \
+                                 PPP_READY, PPP_HEARTBEAT, CURSOR_LIMIT
+                                 
 import logging
 try:
     import ujson as json
@@ -25,11 +27,6 @@ try:
                                     port=int(FLUENT.split(":")[1])))
 except ImportError:
     pass #oh well, stdout is ok
-
-# Paranoid Pirate Protocol constants
-PPP_READY = "\x01" # Signals worker is ready
-PPP_HEARTBEAT = "\x02" # Signals worker heartbeat
-CURSOR_LIMIT = 1000
 
 
 class Worker(object):
@@ -64,13 +61,16 @@ class WorkerQueue(object):
             address, worker = self.queue.popitem(False)
         except KeyError:
             LOGGER.error({"errmsg":"No workers available"})
+        LOGGER.debug("using %s of %s" %(address, ' '.join(self.queue)))
         return address
     
     def get_worker(self, cursor_id):
         LOGGER.debug("Looking for %s in %s" %(cursor_id, str(self.cursors)))
         address = self.cursors.get(cursor_id, None)
         if address:
-            del(self.cursors[cursor_id])
+            del(self.cursors[cursor_id])#cannot send parallel more
+            del(self.queue[address]) #get the worker out of the active
+            LOGGER.debug("using %s of %s" %(address, ' '.join(self.queue)))
         if not address:
             address = self.next()
         return address
@@ -125,6 +125,7 @@ class Broker(object):
                 LOGGER.error( "E: Invalid message: %s" % msg)
         else:
             self.log_id(workers, address, msg)
+            LOGGER.critical({"response":"%s" %(frames[:3])})
             frontend.send_multipart(msg)
     
     def handle_frontend(self, frontend, backend, workers):
@@ -138,6 +139,7 @@ class Broker(object):
         else:
             worker_id = workers.next()
         frames.insert(0, worker_id)
+        LOGGER.critical({"request":"%s" %(frames)})
         backend.send_multipart(frames)
         
     def start(self):
