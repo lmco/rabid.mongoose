@@ -19,9 +19,8 @@ from bson.objectid import ObjectId
 from mongor import GlobalQuery
 from time import time
 import logging
-from multiprocessing import Lock
 from Queue import Queue
-from threading import Thread
+from threading import Thread, Lock
 
 
 
@@ -65,7 +64,7 @@ class MongoHandler:
         else:
             self.sender = FakeFluentSender()
     def has_cursor(self, cursor_id):
-        '''public function for caller to check if this handler has the 
+        '''public function for caller to check if this handler has the cursor
         '''
         has_cursor = False
         if hasattr(self, "cursors"): 
@@ -334,7 +333,8 @@ class MongoHandler:
                 count_per_host += 1
                 if count_per_host >= limit:
                     break
-                lock.acquire()#Lock while getting the next document
+                if not lock.acquire(False):#Lock while getting the next document
+                    break #main thread acquired the lock
         except AutoReconnect:
             errors.put({"host" : host, "errmsg" : "AutoReconnect, Try Again"})
         except OperationFailure, op_failure: 
@@ -448,7 +448,7 @@ class MongoHandler:
                      "results": pointer to Queue.Queue, 
                      "errors":  pointer to Queue.Queue,
                      "host": str,
-                     "lock": pointer to multiprocessing.Lock}
+                     "lock": pointer to threading.Lock}
             2. end_time: <time.time> 
         Returns:
             errors <list>
@@ -481,7 +481,7 @@ class MongoHandler:
                      "results": pointer to Queue.Queue, 
                      "errors":  pointer to Queue.Queue,
                      "host": str,
-                     "lock": pointer to multiprocessing.Lock}
+                     "lock": pointer to threading.Lock}
             2. query_pointers: <dict> includes a field
                                query_pointers['dereferenced'] 
         Returns:
@@ -514,7 +514,7 @@ class MongoHandler:
                      "results": pointer to Queue.Queue, 
                      "errors":  pointer to Queue.Queue,
                      "host": str,
-                     "lock": pointer to multiprocessing.Lock}
+                     "lock": pointer to threading.Lock}
         Returns:
             None
         Ensures:

@@ -5,7 +5,7 @@ setup(
     name='python-rabid.mongoose',
     version='0.2',
     url='https://github.com/lmco/rabid.mongoose',
-    description='A REST interface for python-mongor',
+    description='A REST interface for MongoR',
     author='Daniel Bauman',
     author_email='Daniel.Bauman@lmco.com',
     license='MIT',

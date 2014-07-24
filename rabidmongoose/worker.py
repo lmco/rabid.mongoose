@@ -8,7 +8,8 @@ import zmq
 from rabidmongoose.handlers import MongoHandler
 from rabidmongoose.config import MONGOR, TIMEOUT, FLUENT, LOGTAG, \
                                  HEARTBEAT_LIVENESS, HEARTBEAT_INTERVAL, \
-                                 INTERVAL_INIT, INTERVAL_MAX
+                                 INTERVAL_INIT, INTERVAL_MAX, \
+                                 PPP_READY, PPP_HEARTBEAT
 from StringIO import StringIO
 import logging
 from uuid import uuid4
@@ -27,10 +28,6 @@ try:
                                     port=int(FLUENT.split(":")[1])))
 except ImportError:
     pass #oh well, stdout is ok
-
-# Paranoid Pirate Protocol constants
-PPP_READY = "\x01" # Signals worker is ready
-PPP_HEARTBEAT = "\x02" # Signals worker heartbeat
 
 
 class MongooseHandler:
