@@ -6,7 +6,7 @@ from random import randint
 import time
 import zmq
 from rabidmongoose.handlers import MongoHandler
-from rabidmongoose.config import MONGOR, TIMEOUT, FLUENT, LOGTAG, \
+from rabidmongoose.config import MONGOR, MONGOR_SSL, TIMEOUT, FLUENT, LOGTAG, \
                                  HEARTBEAT_LIVENESS, HEARTBEAT_INTERVAL, \
                                  INTERVAL_INIT, INTERVAL_MAX, \
                                  PPP_READY, PPP_HEARTBEAT
@@ -34,6 +34,7 @@ class MongooseHandler:
     def __init__(self, name=None):
         self.name = name or str(uuid4())
         self.mongo_handler = MongoHandler(MONGOR, 
+                             mongor_ssl = MONGOR_SSL,
                              cursor_timeout = TIMEOUT,
                              fluentd = FLUENT,
                              logtag = LOGTAG)
@@ -56,9 +57,6 @@ class MongooseHandler:
             out('{"ok" : 0, "errmsg" : "%s not callable"}' %(func_name))
         current_cursors = set(self.mongo_handler.available_cursors())
         return response_content.getvalue(), current_cursors
-
-
-
 
 def worker_socket(context, poller):
     """Helper function that returns a new configured socket
@@ -84,8 +82,9 @@ def handle_request(request_data):
     except KeyError:
         resp =  '{"ok" : 0, "errmsg" : "required keys not provided"}'
     except:
-        resp =  '{"ok" : 0, "errmsg" : "Unknown error in request worker"}'
+        resp = '{"ok" : 0, "errmsg" : "Unknown error in request worker"}'
     return resp
+
 
 def start():
     global MH 
@@ -99,7 +98,8 @@ def start():
     while True:
         socks = dict(poller.poll(HEARTBEAT_INTERVAL * 1000))
         # Handle worker activity on backend
-        if socks.get(worker) == zmq.POLLIN:
+        activity = socks.get(worker)
+        if activity == zmq.POLLIN:
             # Get message
             # - 3-part envelope + content -> request
             # - 1-part HEARTBEAT -> heartbeat
@@ -116,19 +116,9 @@ def start():
                 LOGGER.error( {"errmsg": "Invalid message: %s" % frames })
                 interval = INTERVAL_INIT
         else:
-            liveness -= 1
-            if liveness == 0:
-                LOGGER.error({"errmsg": "Heartbeat failure",
-                              "reconnect": "Reconnect in %0.2fs" % interval})
-                time.sleep(interval)
-                
-                if interval < INTERVAL_MAX:
-                    interval *= 2
-                poller.unregister(worker)
-                worker.setsockopt(zmq.LINGER, 0)
-                worker.close()
-                worker = worker_socket(context, poller)
-                liveness = HEARTBEAT_LIVENESS
+            LOGGER.debug({"msg": "Heartbeat miss",
+                          "activity": activity,
+                          "worker": worker.getsockopt_string(zmq.IDENTITY)})
         if time.time() > heartbeat_at:
             heartbeat_at = time.time() + HEARTBEAT_INTERVAL
             worker.send(PPP_HEARTBEAT)
