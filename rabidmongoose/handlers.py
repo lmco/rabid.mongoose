@@ -1,3 +1,7 @@
+'''
+handler.py is responsible to translate requests from
+rabid.mongoose worker into a MongoR command issued to the database
+'''
 # This file incorporates work covered by the following copyright and
 # permission notice:  
 #    Copyright 2009-2010 10gen, Inc.
@@ -21,7 +25,7 @@ from time import time
 import logging
 from Queue import Queue
 from threading import Thread, Lock
-
+from datetime import datetime
 
 
 FORMAT = '%(asctime)s %(levelname)-8s %(message)s'
@@ -45,6 +49,7 @@ class MongoHandler:
     mh = None
     _cursor_id = 0
     def __init__(self, mongos,
+                 mongor_ssl = False,
                  cursor_timeout = 600, #10 Minutes
                  fluentd = "localhost:24224", 
                  logtag = "rabidmongoose"):
@@ -53,7 +58,10 @@ class MongoHandler:
         self.mongor_uri  =  "".join(mongos)
         self.mongor_host = self.mongor_uri[10:].split(":")[0]
         self.mongor_port = int(self.mongor_uri[10:].split(":")[1])
-        LOGGER.debug('Initialized MongoHandler. URI: %s, Host: %s, Port: %s', self.mongor_uri, self.mongor_host, self.mongor_port)
+        self.mongor_ssl = mongor_ssl
+        LOGGER.debug('INIT - URI: %s, Host: %s, Port: %s' %(self.mongor_uri,
+                                                            self.mongor_host,
+                                                            self.mongor_port))
         if HAS_FLUENT:
             self.sender = FluentSender(host = fluentd.split(":")[0], 
                                        port = int(fluentd.split(":")[1]), 
@@ -84,7 +92,9 @@ class MongoHandler:
         if not db_tags:
             db_tags = []
         LOGGER.debug("Using db_type: '%s', db_tags: '%s'", db_type, db_tags)
-        unique_id = db_type+"_"+"_".join(db_tags) #TODO: add a timestamp here to refresh
+        unique_id = "%s_%s_%s" %(db_type,
+                                 "_".join(sorted(db_tags)),
+                                 datetime.now().timetuple().tm_yday)
         LOGGER.debug("Using unique ID: '%s'", unique_id)
         
         if unique_id not in self.connections:
@@ -94,6 +104,7 @@ class MongoHandler:
             try:
                 self.connections[unique_id] = GlobalQuery(self.mongor_host,
                                                           config_port=self.mongor_port,
+                                                          config_ssl=self.mongor_ssl,
                                                           db_type=db_type, 
                                                           db_tags=db_tags)
             except ConnectionFailure:
@@ -248,6 +259,76 @@ class MongoHandler:
         args['command'] = command
         return self.sender.emit("search", args)
         
+    def _stats(self, args, out, name = None, db = None, collection = None):
+        """Generates Basic Stats for the MongoR cluster
+        Args:
+            args: The query arguments.
+            out: An instance of a callable which takes a single string parameter.
+                 Used to send data back to the client.
+            name: TBD (default None)
+            db: TBD (default None)
+            collection: TBD (default None)
+        Returns:
+            None
+        """
+        LOGGER.debug({"msg":'Received _stats request. Arguments: %s' %args})
+        if db == None or collection == None:
+            out('{"ok" : 0, "errmsg" : "db and collection must be defined"}')
+            return
+        db_type = db #leave the original interface to minimize change footprint for now
+        # Parse the provided arguments into the expected keys
+        (username, db_tags,
+         criteria, fields,
+         sort, limit, skip) = self.__parse_arguments(args, out)
+        conn = self._get_connection(db_type, db_tags)
+        if not conn:
+            out('{"ok" : 0, "errmsg" : "couldn\'t get connection to mongo. Check config.py"}')
+            return
+        stats = []
+        errors = []
+        responsive = []
+        unresponsive = []
+        for host, query in conn.remote_databases.items():
+            if not query:
+                unresponsive.append(host)
+            else:
+                responsive.append(host)
+                try:
+                    stats.append({"host":host,
+                                  "earliest":self.__earliest(host, 
+                                                             query, 
+                                                             collection)})
+                except AutoReconnect:
+                    errors.append({"host" : host, 
+                                   "errmsg" : "AutoReconnect, Try Again"})
+                except OperationFailure, op_failure:
+                    errors.append({"host" : host, 
+                                   "errmsg" : "%s" % op_failure})
+                except StopIteration:
+                    # this is so stupid, there's no has_next?
+                    pass
+                
+        success = 1
+        if errors:
+            success = 0
+        out(json.dumps({"results" : stats, 
+                        "id" : 0, 
+                        "ok" : success,
+                        "responsive": responsive,
+                        "unresponsive": unresponsive,
+                        "errors":errors}, default=json_util.default))
+        return
+    def __earliest(self, host, query, collection):
+        '''Returns the timestamp of the earliest record in the database'''
+        reverse_databases = query.databases[::-1]
+        for db in reverse_databases:
+            try:
+                doc = db[collection].find({}, {"_id":1}).sort([("_id", 1)])[0]
+                if doc:
+                     return doc['_id'].generation_time.isoformat()
+            except IndexError:
+                continue
+        return "0"
     def _find(self, args, out, name = None, db = None, collection = None):
         """Generates MongoR cursors used for iterating the data
         Calls _more with its own cursorID 
@@ -269,7 +350,7 @@ class MongoHandler:
             out('{"ok" : 0, "errmsg" : "db and collection must be defined"}')
             return
         
-        db_type = db #leave the original interface to minimize change footprint for now
+        db_type = db #leave the original interface
         
         self._clean_cursors()
         
@@ -280,7 +361,7 @@ class MongoHandler:
         
         conn = self._get_connection(db_type, db_tags)
         if not conn:
-            out('{"ok" : 0, "errmsg" : "couldn\'t get connection to mongo. Check config.py"}')
+            out('{"ok" : 0, "errmsg" : "No Connection, Check config.py"}')
             return
         
         docs = []
@@ -419,15 +500,17 @@ class MongoHandler:
             else:
                 unresponsive.append(host)
         errors.extend(self.__wait_for_data(responses, end_time))
-        #this is the function where the data gets moved from the mpq into the query_pointers var,
-        #errors extend the main thread errors.
+        #moved from the mpq into the query_pointers var,
+        #function modifies query_pointers and returns errors
         errors.extend(self.__unload_data(responses, query_pointers)) 
         self.__destroy_subprocesses(responses)
         success = 1
         if len(errors):
             success = 0
         #HOLY COW THIS IS INEFFICIENT, BUT IT WORKS
-        sorted_docs = sorted(query_pointers['dereferenced'], key=lambda k: str(k['_id']), reverse=True)
+        sorted_docs = sorted(query_pointers['dereferenced'], 
+                             key=lambda k: str(k['_id']), #id ~= time 
+                             reverse=True) #return the most recent first
         return_docs = sorted_docs[:limit]
         query_pointers['dereferenced'] = sorted_docs[limit:]
         #end presumably inefficient section / whatever
@@ -461,7 +544,7 @@ class MongoHandler:
             timeout = 1
             if now_time > end_time:
                 timeout = 1
-                LOGGER.error({"msg":"timeout waiting for data from %s" %(response['host'])})
+                LOGGER.error({"msg":"timeout wait: %s" %(response['host'])})
                 errors.append("timeout %s" %(response['host']))
             else:
                 timeout = end_time - now_time
@@ -492,14 +575,10 @@ class MongoHandler:
         '''
         errors = []
         for response in responses:
+            #manual locking via thread.lock so .empty() should work
             while not response['results'].empty():
-                qsize = response['results'].qsize()
-                LOGGER.debug({"host":response['host'],
-                              "msg":'result size %s' %qsize})
-                try:
-                    query_pointers['dereferenced'].append(response['results'].get())
-                except IOError:
-                    LOGGER.warning({"msg":'IOERROR @ %s' %qsize})
+                result = response['results'].get() #one document from mongo
+                query_pointers['dereferenced'].append(result)
             while not response['errors'].empty():
                 errors.append(response['errors'].get())
         return errors
@@ -523,7 +602,7 @@ class MongoHandler:
         '''
         for response in responses:
             if response['process'].is_alive():
-                LOGGER.warning({"msg":'forcing terminate %s' %response['host']})
+                LOGGER.warning({"err":'terminating %s' %response['host']})
                 response['process'].join()
             
     def __parse_argument(self, args, out, 
@@ -562,7 +641,7 @@ class MongoHandler:
             skip
         """
         if type(args).__name__ != 'dict':
-            LOGGER.error({"msg":'Invalid arguments: Client did not provide a dictionary'})
+            LOGGER.error({"msg":'Invalid arg: did not provide a dictionary'})
             out('{"ok" : 0, "errmsg" : "_find must be a GET request"}')
             return
         
@@ -571,7 +650,7 @@ class MongoHandler:
             out('{"ok" : 0, "errmsg" : "_find must specify db_tags"}')
             return
         
-        db_tags = args['db_tags']
+        db_tags = self.__parse_argument(args, out, "db_tags", "", cast=str).split(",")
         LOGGER.debug({"msg":'Provided db_tags: %s' %db_tags})
         
         username = self.__parse_argument(args, out, "username", "", cast=str)
@@ -598,7 +677,8 @@ class MongoHandler:
             # Iterate over the sort dictionary.  
             # The key is the value to sort. The value is the direction (1/-1)
             for sort_key, sort_value in sort_data.iteritems():
-                LOGGER.debug({"msg":'Sort Key/Value: %s, %s' %(sort_key, sort_value)})
+                LOGGER.debug({"msg":'Sort Key/Value: %s, %s' %(sort_key, 
+                                                               sort_value)})
                 # Sort is provided as an integer value.
                 # A value of 1 indicates ASCENDING, -1 indicates descending.
                 sort_order = ASCENDING if sort_value == 1 else DESCENDING
@@ -653,7 +733,7 @@ class FakeFluentSender:
     def __init__(self):
         '''emulates the emit function 
         of the fluent.sender.FluentSender class'''
-        LOGGER.debug({"msg":'python fluent sender not installed, using logging'})
+        LOGGER.debug({"msg":'python fluent not installed, using logging'})
     
     @staticmethod
     def emit_with_time(label, timestamp, data):
@@ -667,25 +747,3 @@ class FakeFluentSender:
         to python-fluent that simply prints to stdout''' 
         return LOGGER.debug({"msg":"%s:\t%s" %(label, data)})
     
-'''
-if __name__ == "__main__":
-    from StringIO import StringIO
-    out = StringIO()
-    
-    handler = MongoHandler(['mongodb://localhost:27017'])
-    
-    # make this backward compatible with httpd.py
-    args = {
-        'db_tags': ['metadata'],
-        'criteria': ['{"source": "mailmon+bbsensor01"}']
-        #'sort': ['{"scanTime":"-1"}'],
-        #'limit': ['1']
-    }
-    
-    #handler._find(args, out.write, db='open_metadata', collection="filesData")
-    handler._count(args, out.write, db='open_metadata', collection="filesData")
-    
-    result = str(out.getvalue())
-    
-    print result
-'''

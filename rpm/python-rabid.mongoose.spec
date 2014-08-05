@@ -2,7 +2,7 @@
 %define version 0.2
 %define unmangled_version 0.2
 %define unmangled_version 0.2
-%define release 4
+%define release 7
 
 Summary: A REST interface for searching pymongor 
 Name: %{name}
